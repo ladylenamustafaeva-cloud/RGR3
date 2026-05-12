@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import signal
+import os
+
+# Создаём папку для результатов
+os.makedirs('figures', exist_ok=True)
+os.makedirs('results', exist_ok=True)
+
+L = 0.916          # длина маятника, м
+g = 9.81          # ускорение свободного падения, м/с²
+theta0_expected = 10  # ожидаемый начальный угол, градусы
+
+print("="*70)
+print("ОБРАБОТКА ДАННЫХ МАЯТНИКА ИЗ TRACKER")
+print("="*70)
+print(f"Длина маятника: L = {L:.3f} м")
+print(f"Ускорение свободного падения: g = {g:.2f} м/с²")
+print(f"Ожидаемый угол: θ₀ ≈ {theta0_expected}°")
+print("="*70)
+
+try:
+    data = pd.read_csv('видео6.txt', 
+                       sep='\s+',           # разделитель - пробелы/табуляция
+                       comment='#',         # игнорировать строки с #
+                       skiprows=2,          # пропустить заголовок
+                       decimal=',',         # запятая как разделитель дробной части!
+                       names=['t', 'x', 'y', 'vx', 'vy'],
+                       na_values=[''])      # пустые ячейки как NaN
+    
+    # Очистка: убираем строки с пропущенными значениями
+    data = data.dropna(subset=['t', 'x', 'y']).reset_index(drop=True)
+    
+    print(f"Загружено {len(data)} точек данных")
+    print(f"Время: от {data['t'].min():.3f} с до {data['t'].max():.3f} с")
+    print(f"Длительность записи: {data['t'].max() - data['t'].min():.2f} с")
+    
+except FileNotFoundError:
+    print("ОШИБКА: Файл 'видео1.txt' не найден!")
+    print("Убедитесь, что файл находится в той же папке, что и скрипт.")
+    exit(1)
+except Exception as e:
+    print(f"ОШИБКА при чтении файла: {e}")
+    exit(1)
+
+print("\n Расчёт угла отклонения θ(t)...")
+
+# Положение равновесия (среднее по всем кадрам)
+x_eq = data['x'].mean()
+print(f"   Положение равновесия: x₀ = {x_eq*100:.2f} см")
+
+# Расчёт угла: θ = arcsin((x - x₀) / L)
+arg = (data['x'] - x_eq) / L
+arg = np.clip(arg, -1, 1)  # защита от численных ошибок
+
+data['theta_rad'] = np.arcsin(arg)
+data['theta_deg'] = np.degrees(data['theta_rad'])
+
+# Начальный угол (максимальное отклонение)
+theta0_exp = data['theta_deg'].abs().max()
+print(f"Измеренный начальный угол: θ₀ = {theta0_exp:.2f}°")
+
+print("\nТеоретические значения:")
+
+T0 = 2 * np.pi * np.sqrt(L / g)
+omega = np.sqrt(g / L)
+
+print(f"Теоретический период малых колебаний: T₀ = {T0:.4f} с")
+print(f"Круговая частота: ω = {omega:.4f} рад/с")
+
+# Теоретическая кривая
+t0_shift = data['t'].iloc[0]
+theta_theory = theta0_exp * np.cos(omega * (data['t'] - t0_shift))
+
+print("\nИзмерение экспериментального периода")
+
+theta = data['theta_rad'].values
+t = data['t'].values
+
+# Находим пересечения с нулём (прохождение через положение равновесия)
+sign_changes = np.where(np.diff(np.sign(theta)))[0]
+
+# Интерполяция для более точного времени пересечения
+zero_cross_times = []
+for idx in sign_changes:
+    if idx + 1 < len(t):
+        t1, t2 = t[idx], t[idx+1]
+        th1, th2 = theta[idx], theta[idx+1]
+        if th2 != th1:
+            t_zero = t1 - th1 * (t2 - t1) / (th2 - th1)
+            zero_cross_times.append(t_zero)
+
+zero_cross_times = np.array(zero_cross_times)
+print(f"Найдено {len(zero_cross_times)} пересечений с нулём")
+
+# Период = время между каждым ВТОРЫМ пересечением (полный цикл)
+periods = []
+for i in range(0, len(zero_cross_times) - 2, 2):
+    T = zero_cross_times[i+2] - zero_cross_times[i]
+    periods.append(T)
+
+if len(periods) > 0:
+    T_exp = np.mean(periods)
+    T_std = np.std(periods)
+    n_cycles = len(periods)
+    
+    print(f"Экспериментальный период: T_эксп = {T_exp:.4f} ± {T_std:.4f} с")
+    print(f"(измерено по {n_cycles} полным колебаниям)")
+else:
+    print("Не удалось измерить период (мало данных)")
+    T_exp = T0
+    T_std = 0
+    n_cycles = 0
+
+print("\nРасчёт погрешностей")
+
+delta_T_abs = abs(T_exp - T0)
+delta_T_rel = delta_T_abs / T0 * 100 if T0 != 0 else 0
+
+# Оценка инструментальных погрешностей
+delta_L = 0.001          # погрешность длины, м (1 мм)
+delta_t_frame = 1/60     # погрешность времени (1 кадр при 60 fps), с
+delta_T_instr = np.sqrt((0.5*delta_L/L*T0)**2 + (delta_t_frame/np.sqrt(n_cycles) if n_cycles > 0 else 0)**2)
+
+print(f"   Абсолютная погрешность: |ΔT| = {delta_T_abs:.4f} с")
+print(f"   Относительная погрешность: δ = {delta_T_rel:.3f}%")
+print(f"   Оценка инструментальной погрешности: ΔT_инстр = {delta_T_instr:.4f} с")
+
+
+# 1. Таблица с обработанными данными
+data_export = data[['t', 'x', 'y', 'theta_rad', 'theta_deg']].copy()
+data_export.to_csv('results/pendulum_processed.csv', index=False, decimal=',', sep=';')
+print("results/pendulum_processed.csv - обработанные данные (t, x, y, θ)")
+
+# 2. Таблица результатов
+results_dict = {
+    'Параметр': [
+        'Длина маятника L, м',
+        'Начальный угол θ₀, °',
+        'Теоретический период T₀, с',
+        'Экспериментальный период T_эксп, с',
+        'Стандартное отклонение σ, с',
+        'Число измеренных колебаний',
+        'Абсолютная погрешность |ΔT|, с',
+        'Относительная погрешность δ, %',
+        'Инструментальная погрешность ΔT, с'
+    ],
+    'Значение': [
+        f'{L:.3f}',
+        f'{theta0_exp:.2f}',
+        f'{T0:.4f}',
+        f'{T_exp:.4f}',
+        f'{T_std:.4f}',
+        f'{n_cycles}',
+        f'{delta_T_abs:.4f}',
+        f'{delta_T_rel:.3f}',
+        f'{delta_T_instr:.4f}'
+    ]
+}
+
+df_results = pd.DataFrame(results_dict)
+df_results.to_csv('results/results_summary.csv', index=False, encoding='utf-8-sig')
+print("results/results_summary.csv - сводная таблица результатов")
+
+
+# График 1: θ(t) с теоретической кривой
+plt.figure(figsize=(12, 5))
+plt.plot(data['t'], data['theta_deg'], 'b-', label='Эксперимент', linewidth=0.8, alpha=0.7)
+plt.plot(data['t'], theta_theory, 'r--', label=f'Теория: θ₀·cos(ωt)', linewidth=1.5)
+plt.xlabel('Время, с', fontsize=11)
+plt.ylabel('Угол, °', fontsize=11)
+plt.title(f'Колебания маятника, θ₀ = {theta0_exp:.1f}°\nT₀ = {T0:.4f} с, T_эксп = {T_exp:.4f} с', fontsize=13)
+plt.legend(fontsize=10)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('figures/theta_vs_time.png', dpi=300)
+plt.close()
+print("figures/theta_vs_time.png - зависимость угла от времени")
+
+# График 2: Фазовая траектория (θ vs dθ/dt)
+data['dtheta_dt'] = np.gradient(data['theta_rad'], data['t'])
+plt.figure(figsize=(8, 6))
+plt.plot(data['theta_deg'], np.degrees(data['dtheta_dt']), 'b-', linewidth=0.5, alpha=0.6)
+plt.xlabel('Угол θ, °', fontsize=11)
+plt.ylabel('Угловая скорость dθ/dt, °/с', fontsize=11)
+plt.title('Фазовая траектория маятника', fontsize=12)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('figures/phase_trajectory.png', dpi=300)
+plt.close()
+print("figures/phase_trajectory.png - фазовая траектория")
+
+# График 3: Отклонение от теории
+residuals = data['theta_deg'] - theta_theory
+plt.figure(figsize=(12, 4))
+plt.plot(data['t'], residuals, 'g-', linewidth=0.8, alpha=0.7)
+plt.axhline(y=0, color='r', linestyle='--', linewidth=1, alpha=0.5)
+plt.xlabel('Время, с', fontsize=11)
+plt.ylabel('Отклонение от теории, °', fontsize=11)
+plt.title('Разница между экспериментом и теорией', fontsize=12)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('figures/residuals.png', dpi=300)
+plt.close()
+print("figures/residuals.png - отклонение от теоретической кривой")
+
+print("\n" + "="*70)
+print("ВЫВОДЫ")
+print("="*70)
+
+if delta_T_rel < 1:
+    quality = "ОТЛИЧНОЕ"
+elif delta_T_rel < 3:
+    quality = "ХОРОШЕЕ"
+elif delta_T_rel < 5:
+    quality = "УДОВЛЕТВОРИТЕЛЬНОЕ"
+else:
+    quality = "ТРЕБУЕТ УЛУЧШЕНИЯ"
+
+print(f"1. Качество соответствия теории: {quality}")
+print(f"   Относительная погрешность: {delta_T_rel:.3f}%")
+print()
+print(f"2. Экспериментальный период T_эксп = {T_exp:.4f} ± {T_std:.4f} с")
+print(f"   Теоретический период T₀ = {T0:.4f} с")
+print(f"   Расхождение: {delta_T_abs:.4f} с")
+print()
+print(f"3. Начальный угол θ₀ = {theta0_exp:.2f}°")
+if theta0_exp < 10:
+    print(" Условие малых колебаний (θ₀ < 10°) выполняется!")
+else:
+    print("Условие малых колебаний нарушено - нужна нелинейная модель")
+print()
+print(f"4. Измерено {n_cycles} полных колебаний")
+print(f"5. Данные сохранены в папках 'results/' и 'figures/'")
+print("="*70)
+print("\nОбработка завершена успешно!")
+print("\nФайлы для отчёта:")
+print("figures/theta_vs_time.png - основной график")
+print("results/results_summary.csv - таблица результатов")
+print("results/pendulum_processed.csv - все данные")
